@@ -48,6 +48,7 @@ run(N, R, #{verbose := Verbose}) ->
     T1 = erlang:monotonic_time(millisecond),
     io:format("Network built in ~b ms~n", [T1 - T0]),
 
+    Stats ! start,
     [Pid ! start || Pid <- maps:values(Peers)],
     Summary = receive {stats_done, S} -> S end,
     T2 = erlang:monotonic_time(millisecond),
@@ -96,6 +97,8 @@ stats(Ids, Total, Gets, Main) ->
     S = #{ids => Ids, total => Total, expected_gets => Gets,
           delivered => 0, hops => 0, hist => #{}, closest => 0,
           gets => #{ok => 0, wrong => 0, not_found => 0}, got => 0},
+    %% The stall timer only runs once the requests have started.
+    receive start -> ok end,
     stats_loop(S, Main).
 
 stats_loop(S = #{delivered := D, total := T, got := G, expected_gets := EG}, Main)
