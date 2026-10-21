@@ -1,0 +1,6 @@
+#!/usr/bin/env escript
+%%! +P 4000000 -noshell
+%% Wrapper so the program can be run as: escript project3 numNodes numRequests
+main(Args) ->
+    code:add_patha(filename:dirname(escript:script_name())),
+    project3:main(Args).
