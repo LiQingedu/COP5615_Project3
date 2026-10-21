@@ -1,0 +1,8 @@
+Pastry: 100000 nodes, 5 requests per node (b = 4, leaf set 16)
+Network built in 192209 ms
+Requests: 500000/500000 delivered in 7.1 s
+Average hops: 3.960  (ceil(log16 N) = 5)
+Hop distribution:  1: 338  2: 7920  3: 83520  4: 328070  5: 80152
+Reached the numerically closest node: 500000/500000
+Gets: 200000 ok, 0 wrong string, 0 not found
+RESULT,100000,5,3.9596,500000,500000,500000,200000,0,0,192209,7120
