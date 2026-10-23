@@ -1,7 +1,8 @@
 -module(project3).
 %% COP5615 Project 3: the Pastry protocol with a simple key -> string store.
 %%
-%% Usage: escript project3 numNodes numRequests [verbose=true]
+%% Usage: escript ./project3 numNodes numRequests
+%%        [verbose=true] [failure=true|single|nodes:N|percent:P|edges:P|temporary-edges:P|combined-percent:P|permanent|temporary|multiple]
 %%
 %% The main process creates the peers one at a time; each joins through a
 %% random peer that has already joined. Then every peer makes numRequests
@@ -9,13 +10,26 @@
 %% delivered request, checks that it reached the node numerically closest to
 %% its key, and tells the main process when all requests are done.
 
--export([main/1, start/0]).
+-export([main/1, start/0, start/1, start/2]).
 
 -define(STALL_MS, 10000).
 
 start() ->
     main(init:get_plain_arguments()),
     halt().
+
+%% `erl -noshell -s project3 start 1000 10` passes one list of atoms.
+start(Args) when is_list(Args) ->
+    main([arg_string(Arg) || Arg <- Args]),
+    halt().
+
+%% Also accept runtimes or wrappers that invoke start/2 directly.
+start(NodesArg, RequestsArg) ->
+    main([arg_string(NodesArg), arg_string(RequestsArg)]),
+    halt().
+
+arg_string(Arg) when is_atom(Arg) -> atom_to_list(Arg);
+arg_string(Arg) -> Arg.
 
 main([NodesArg, RequestsArg | Opts]) ->
     try {list_to_integer(NodesArg), list_to_integer(RequestsArg)} of
@@ -28,15 +42,46 @@ main(_) ->
     usage().
 
 usage() ->
-    io:format("usage: project3 numNodes numRequests [verbose=true]~n"),
+    io:format("usage: project3 numNodes numRequests [verbose=true] "
+              "[failure=true|single|nodes:N|percent:P|edges:P|temporary-edges:P|combined-percent:P|permanent|temporary|multiple]~n"),
     halt(1).
 
 options(Opts) ->
     lists:foldl(fun("verbose=true", O) -> O#{verbose => true};
-                   (Opt, _) -> io:format("unknown option ~s~n", [Opt]), usage()
-                end, #{verbose => false}, Opts).
+                   ("failure=true", O) -> O#{failure => combined};
+                   ("failure=single", O) -> O#{failure => single};
+                   ("failure=permanent", O) -> O#{failure => permanent};
+                   ("failure=temporary", O) -> O#{failure => temporary};
+                   ("failure=multiple", O) -> O#{failure => multiple};
+                   (Opt, O) -> failure_nodes_option(Opt, O)
+                end, #{verbose => false, failure => false}, Opts).
 
-run(N, R, #{verbose := Verbose}) ->
+failure_nodes_option(Opt, O) ->
+    case string:split(Opt, "failure=nodes:", leading) of
+        [[], CountArg] ->
+            case string:to_integer(CountArg) of
+                {Count, []} when Count >= 1 -> O#{failure => {nodes, Count}};
+                _ -> io:format("invalid failure option ~s~n", [Opt]), usage()
+            end;
+        _ -> failure_percentage_option(Opt, O)
+    end.
+
+failure_percentage_option(Opt, O) ->
+    Prefixes = [{"failure=percent:", nodes}, {"failure=edges:", edges},
+                {"failure=temporary-edges:", temporary_edges},
+                {"failure=combined-percent:", combined}],
+    case [{Kind, string:split(Opt, Prefix, leading)} || {Prefix, Kind} <- Prefixes,
+                                                         string:prefix(Opt, Prefix) =/= nomatch] of
+        [{Kind, [[], PercentArg]}] ->
+            case string:to_integer(PercentArg) of
+                {Percent, []} when Percent >= 1, Percent < 100 ->
+                    O#{failure => {Kind, Percent}};
+                _ -> io:format("invalid failure option ~s~n", [Opt]), usage()
+            end;
+        _ -> io:format("unknown option ~s~n", [Opt]), usage()
+    end.
+
+run(N, R, #{verbose := Verbose, failure := Failure}) ->
     Main = self(),
     Ids = lists:sort([pastry:id(node_name(I)) || I <- lists:seq(1, N)]),
     Gets = N * (R div 2),
@@ -48,11 +93,114 @@ run(N, R, #{verbose := Verbose}) ->
     T1 = erlang:monotonic_time(millisecond),
     io:format("Network built in ~b ms~n", [T1 - T0]),
 
+    LivePeers = case Failure of
+                        false -> Peers;
+                        Mode -> inject_failures(Peers, Mode)
+                    end,
+    LiveIds = lists:sort([pastry:id(node_name(I)) || {I, Pid} <- maps:to_list(LivePeers),
+                                                   is_process_alive(Pid)]),
+    Stats ! {live_ids, lists:sort(LiveIds), R},
     Stats ! start,
-    [Pid ! start || Pid <- maps:values(Peers)],
+    [Pid ! start || Pid <- maps:values(LivePeers), is_process_alive(Pid)],
     Summary = receive {stats_done, S} -> S end,
     T2 = erlang:monotonic_time(millisecond),
-    report(N, R, Summary, T1 - T0, T2 - T1).
+    report(length(LiveIds), R, Summary, T1 - T0, T2 - T1).
+
+inject_failures(Peers, single) ->
+    [{DeadId, DeadPid} | _] = maps:to_list(Peers),
+    exit(DeadPid, kill),
+    io:format("Failure test: stopped node ~b~n", [DeadId]),
+    maps:remove(DeadId, Peers);
+inject_failures(Peers, {nodes, Count}) when Count < map_size(Peers) ->
+    stop_random_nodes(Peers, Count);
+inject_failures(Peers, {nodes, Count}) ->
+    io:format("failure=nodes:~b requires 1 <= N < numNodes (~b)~n",
+              [Count, map_size(Peers)]),
+    usage();
+inject_failures(Peers, {percent, Percent}) ->
+    Count = (map_size(Peers) * Percent + 99) div 100,
+    stop_random_nodes(Peers, Count);
+inject_failures(Peers, {edges, Percent}) ->
+    block_random_edges(Peers, Percent, infinity);
+inject_failures(Peers, {temporary_edges, Percent}) ->
+    block_random_edges(Peers, Percent, 3000);
+inject_failures(Peers, {combined, Percent}) ->
+    Count = (map_size(Peers) * Percent + 99) div 100,
+    LivePeers = stop_random_nodes(Peers, Count),
+    block_random_edges(LivePeers, Percent, infinity);
+inject_failures(Peers, permanent) ->
+    [{SourceId, SourcePid}, {TargetId, TargetPid} | _] = maps:to_list(Peers),
+    SourcePid ! {disconnect, TargetPid, infinity},
+    io:format("Failure test: permanently blocked connection ~b -> ~b~n",
+              [SourceId, TargetId]),
+    Peers;
+inject_failures(Peers, temporary) ->
+    [{SourceId, SourcePid}, {TargetId, TargetPid} | _] = maps:to_list(Peers),
+    SourcePid ! {disconnect, TargetPid, 3000},
+    io:format("Failure test: temporarily blocked connection ~b -> ~b for 3000 ms~n",
+              [SourceId, TargetId]),
+    Peers;
+inject_failures(Peers, multiple) ->
+    Entries = maps:to_list(Peers),
+    [{DeadId, DeadPid}, {SourceId, SourcePid}, {TempId, TempPid},
+     {TargetId, TargetPid} | _] = Entries,
+    exit(DeadPid, kill),
+    SourcePid ! {disconnect, TempPid, infinity},
+    TempPid ! {disconnect, TargetPid, 3000},
+    io:format("Failure test: stopped node ~b; permanently blocked ~b -> ~b; "
+              "temporarily blocked ~b -> ~b for 3000 ms~n",
+              [DeadId, SourceId, TempId, TempId, TargetId]),
+    maps:remove(DeadId, Peers);
+inject_failures(Peers, combined) ->
+    Entries = maps:to_list(Peers),
+    case Entries of
+        [{DeadId, DeadPid} | Rest] when Rest =/= [] ->
+            exit(DeadPid, kill),
+            [{SourceId, SourcePid} | More] = Rest,
+            SourcePid ! {disconnect, DeadPid, infinity},
+            case More of
+                [{TempId, TempPid} | _] ->
+                    TempPid ! {disconnect, SourcePid, 500},
+                    io:format("Failure test: stopped node ~b; blocked connections from ~b permanently and ~b temporarily~n",
+                              [DeadId, SourceId, TempId]);
+                [] ->
+                    io:format("Failure test: stopped node ~b; blocked connection from ~b permanently~n",
+                              [DeadId, SourceId])
+            end,
+            maps:remove(DeadId, Peers);
+        _ ->
+            io:format("Failure test: requires at least 2 nodes; no node stopped~n"),
+            Peers
+    end.
+
+stop_random_nodes(Peers, Count) ->
+    Shuffled = rand:shuffle(maps:to_list(Peers)),
+    {Dead, Live} = lists:split(Count, Shuffled),
+    [exit(Pid, kill) || {_, Pid} <- Dead],
+    DeadIndices = lists:sort([I || {I, _} <- Dead]),
+    io:format("Failure test: randomly stopped ~b nodes (indices): ~p~n",
+              [Count, DeadIndices]),
+    maps:from_list(Live).
+
+block_random_edges(Peers, Percent, Duration) ->
+    LivePids = sets:from_list(maps:values(Peers)),
+    Edges = lists:usort([{SourcePid, TargetPid} || SourcePid <- maps:values(Peers),
+                                                    {_, TargetPid} <- pastry:known_peers(SourcePid),
+                                                    TargetPid =/= SourcePid,
+                                                    sets:is_element(TargetPid, LivePids)]),
+    Failed = [{SourcePid, TargetPid} || {SourcePid, TargetPid} <- Edges,
+                                        rand:uniform(100) =< Percent],
+    [SourcePid ! {disconnect, TargetPid, Duration} ||
+        {SourcePid, TargetPid} <- Failed],
+    case Duration of
+        infinity ->
+            io:format("Failure test: randomly blocked ~b/~b directed overlay links permanently (~b%)~n",
+                      [length(Failed), length(Edges), Percent]);
+        Ms ->
+            io:format("Failure test: randomly blocked ~b/~b directed overlay links temporarily for ~b ms (~b%)~n",
+                      [length(Failed), length(Edges), Ms, Percent])
+    end,
+    Peers.
 
 node_name(I) ->
     "node-" ++ integer_to_list(I).
@@ -98,8 +246,15 @@ stats(Ids, Total, Gets, Main) ->
           delivered => 0, hops => 0, hist => #{}, closest => 0,
           gets => #{ok => 0, wrong => 0, not_found => 0}, got => 0},
     %% The stall timer only runs once the requests have started.
-    receive start -> ok end,
-    stats_loop(S, Main).
+    receive
+        {live_ids, LiveIds, Requests} ->
+            receive start -> ok end,
+            stats_loop(S#{ids := list_to_tuple(LiveIds),
+                          total := length(LiveIds) * Requests,
+                          expected_gets := length(LiveIds) * (Requests div 2)}, Main);
+        start ->
+            stats_loop(S, Main)
+    end.
 
 stats_loop(S = #{delivered := D, total := T, got := G, expected_gets := EG}, Main)
   when D >= T, G >= EG ->

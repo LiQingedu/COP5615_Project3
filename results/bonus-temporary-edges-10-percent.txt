@@ -1,0 +1,9 @@
+Pastry: 10000 nodes, 5 requests per node (b = 4, leaf set 16)
+Network built in 3345 ms
+Failure test: randomly blocked 55009/549379 directed overlay links temporarily for 3000 ms (10%)
+Requests: 50000/50000 delivered in 5.4 s
+Average hops: 3.365  (ceil(log16 N) = 4)
+Hop distribution:  0: 6  1: 290  2: 4524  3: 25147  4: 17167  5: 2435  6: 381  7: 43  8: 7
+Reached the numerically closest node: 49400/50000
+Gets: 19793 ok, 0 wrong string, 207 not found
+RESULT,10000,5,3.3653,50000,50000,49400,19793,0,207,3345,5432

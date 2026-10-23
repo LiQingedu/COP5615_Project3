@@ -1,0 +1,16 @@
+Pastry: 10000 nodes, 2 requests per node (b = 4, leaf set 16)
+Network built in 3364 ms
+Failure test: randomly stopped 40 nodes (indices): [107,109,351,394,1210,1290,
+                                                    1427,1524,1557,1617,1704,
+                                                    1706,2057,2439,2541,3031,
+                                                    3202,3884,4891,5054,5086,
+                                                    5260,5283,5294,5445,5676,
+                                                    6294,6503,6750,7293,7803,
+                                                    7943,8352,8575,8722,9126,
+                                                    9252,9452,9677,9875]
+Requests: 19920/19920 delivered in 2.0 s
+Average hops: 3.210  (ceil(log16 N) = 4)
+Hop distribution:  0: 4  1: 114  2: 2022  3: 11372  4: 6382  5: 22  6: 4
+Reached the numerically closest node: 19920/19920
+Gets: 9960 ok, 0 wrong string, 0 not found
+RESULT,9960,2,3.2096,19920,19920,19920,9960,0,0,3364,2025

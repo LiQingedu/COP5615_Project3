@@ -1,19 +1,94 @@
 # COP5615_Project3
-Implement in Erlang using the actor model the Pastry protocol and a simple object access service to prove its usefulness.
+
+- Yingzhu Chen 83945095
+- Qing Li 16912349
 
 ## Build and Run
 Requires Erlang/OTP 25 or newer (we use OTP 29).
 
 ```bash
 erl -make
-escript project3 numNodes numRequests
+escript ./project3 numNodes numRequests
 ```
 
 `erl -make` compiles `pastry.erl` before `kvstore.erl`, which uses it as a behaviour. Add `verbose=true` to print join progress to stderr. Without the escript wrapper:
 
 ```bash
 erl -noshell +P 4000000 -pa . -s project3 start -extra 1000 10
+erl -noshell +P 4000000 -pa . -s project3 start 1000 10
 ```
+
+The `./` is intentional: shells do not search the current directory for
+executables unless it is explicitly included in the path.
+
+## What Is Working
+
+- Pastry peers are modeled as Erlang actors, with one process per peer.
+- Nodes join through an existing peer and initialize leaf sets and routing tables.
+- Routing follows the Pastry leaf-set, routing-table, and rare-case rules.
+- In normal mode, messages are delivered to the numerically closest node for
+  the key.
+- The key-value application implements put and get operations for 128-bit keys.
+- Each peer sends about one request per second, with a randomized delay before
+  its first request.
+- The program reports average hops, hop distribution, delivery correctness, and
+  get correctness.
+
+The neighborhood set is omitted because all simulated peers run on one machine
+and the project does not define a proximity metric. The optional failure-model
+work and its results are documented separately in
+[BONUS-REPORT.md](./BONUS-REPORT.md).
+
+Failure experiments can randomly stop nodes, block directed overlay links, or
+combine both. For example, `failure=percent:30` stops 30% of nodes,
+`failure=edges:30` blocks 30% of known directed overlay links, and
+`failure=temporary-edges:30` temporarily blocks 30% of known links for 3 seconds;
+`failure=combined-percent:30` applies both. The report includes 10,000-node
+results for these failure types at 10%, 20%, 30%, 40%, and 50%. See
+[BONUS-REPORT.md](./BONUS-REPORT.md) for commands and captured output.
+
+## Largest Network Tested
+
+The largest successful test used 100,000 Pastry nodes and 5 requests per node,
+for 500,000 total requests:
+
+- 500,000 / 500,000 requests delivered
+- 500,000 / 500,000 requests reached the numerically closest node
+- 200,000 / 200,000 gets returned the correct string
+- Average hops: 3.9596
+
+The captured output is preserved in
+[results/run-100000.txt](./results/run-100000.txt). To reproduce this
+measurement on a machine with sufficient memory and process limits:
+
+```bash
+erl -make
+escript ./project3 100000 5
+```
+
+The final `RESULT` line has the machine-dependent build and request timings;
+the delivery, closest-node, get-correctness, and hop statistics are the
+correctness measurements.
+
+## Hop-Count and API Semantics
+
+- `route/2` creates a request with `Hops = 0`.
+- A local `deliver` therefore records 0 hops.
+- Each peer-to-peer route message increments `Hops` exactly once before it is
+  sent to the next peer.
+- The average is `total_hops / delivered_requests`, including locally
+  delivered requests.
+- A get response is sent directly from `deliver/4` to the requester PID. It
+  does not traverse Pastry and is intentionally excluded from the hop count.
+- `forward/4` is called immediately before every peer-to-peer forward. If the
+  callback returns `null`, `route_msg/4` stops the request at the current peer
+  and does not send another route message.
+- `new_leafs/2` is called by `insert_all/2` whenever the local leaf-set
+  contents change.
+- Requests are not started until `build/6` has completed every join. Each
+  `pastry:init/3` returns only after the joining peer has received all
+  announce acknowledgements, so leaf-set and routing-state initialization
+  precedes workload generation.
 
 ## Files
 | File | What it is |
@@ -35,88 +110,75 @@ erl -noshell +P 4000000 -pa . -s project3 start -extra 1000 10
 | `forward(msg, key, nextId)` | Pastry → app | called just before forwarding; app may change msg or nextId; nextId = NULL ends the message here |
 | `newLeafs(leafSet)` | Pastry → app | called whenever the local leaf set changes |
 
----
+### 1. Layer Boundary in Erlang
 
-## 1. The layer boundary in Erlang
+The implementation separates the Pastry routing layer from the application layer using a callback module. `pastry.erl` manages peer initialization, routing, the leaf set, and the routing table. It defines the application callbacks `deliver/4`, `forward/4`, and `new_leafs/2`, as well as `init/2` and `handle_info/2` for application initialization and message handling.
 
-- **§2.3:** Pastry and the application are separate layers. `Application` is "a handle to the application object that provides the Pastry node with the procedures to invoke" (p.6).
-- **Open:** the handout says one actor per peer, so both layers live in the same Erlang process. There is no "object".
-- **Options:**
-  - a callback module (the Pastry loop calls `App:deliver/…`, `App:forward/…`, `App:newLeafs/…`, like a behaviour);
-  - app state held as a field that the Pastry loop passes to plain functions;
-  - a second actor per peer for the app. Does that break "one actor for each peer"?
-- **Decide:** how would a grader reading your code *see* the five §2.3 calls? Who owns the app state (the key → string map)?
-- **Decision:** a callback module. `pastry.erl` is the peer actor (join, routing, leaf set, routing table) and declares `deliver/4`, `forward/4` and `new_leafs/2` as a behaviour, plus `init/2` and `handle_info/2` for the application's own setup and messages. `deliver` gets the hop count the routing layer measured as an extra argument. `kvstore.erl` is the application and implements them, and it calls `pastry:route/2` from inside its peer. The key → string map is a field of the peer's state that Pastry passes into each callback and takes back out. One process per peer, and all five calls appear by name.
+`kvstore.erl` implements these callbacks and invokes `pastry:route/2` to send requests. The key-value map is stored in the peer's state and passed between the routing layer and application callbacks. Each peer runs in a single Erlang process, and all five application interface functions are explicitly defined.
 
-## 2. `pastryInit(Credentials, Application)`
+### 2. `pastryInit(Credentials, Application)`
 
-- **§2.3:** joins an existing network "(or start a new one)", initializes state, returns the nodeId (p.6).
-- **Open:**
-  - **Bootstrap:** the signature has no argument for *which* existing node to contact, yet a join needs one.
-  - **Credentials:** "application-specific … needed to authenticate". Nothing in the project needs them.
-  - **Start new vs. join:** how does a node know it's the first?
-  - **Return:** in an actor, "returns nodeId" could mean a reply message, the spawn result, or the nodeId being chosen before spawning.
-  - **When it returns:** at once, or only when the join is complete? This matters if requests must wait for the join.
-- **Decide:** what your init looks like, and whether you state that `Credentials` is omitted.
-- **Decision:** `pastry:init(Name, {App, Args}, Bootstrap)` with `Credentials` omitted (nothing in the project authenticates). `Bootstrap = none` starts a new network; otherwise it is the pid of a random node that already joined (there is no proximity metric to pick a nearby one). The nodeId is the MD5 hash of `Name` (`node-<i>`), chosen before spawning, and the call returns `{NodeId, Pid}` only after the join is complete.
-- **Join procedure:**
-  - Nodes join one at a time: main starts the next node only after the previous one reports that it joined. Joins never overlap, so the paper's timestamp scheme for concurrent arrivals is not needed.
-  - The join message is routed with the new node's id as key. Every node on the path appends its routing table and leaf set to the message, and the node numerically closest to the new id sends all of it back in one reply. Erlang does not order messages from different senders, so separate replies would leave the new node unsure when it had heard from the whole path.
-  - The new node adds every node it learned about. This covers the paper's rule (row i from the i-th node on the path, leaf set from the last node).
-  - The new node sends its state to every node in its leaf set and routing table. They add it and acknowledge, and the join is complete when every acknowledgement is in.
-- **Parameters:** 128-bit ids read as 32 hex digits (b = 4) and a leaf set of 16 (8 smaller, 8 larger), as in the paper's experiments. The id space is circular. The neighborhood set is left out: every peer runs on one machine, so there is no network distance, and the paper uses that set only for locality. When two nodes fit the same routing-table slot, the first one seen keeps it.
+The implementation uses `pastry:init(Name, {App, Args}, Bootstrap)`. The `Credentials` parameter is omitted because the project does not require authentication. If `Bootstrap = none`, the node starts a new network; otherwise, it joins through an existing peer.
 
-## 3. `route(msg, key)`
+Each node's ID is the MD5 hash of its name, such as `node-<i>`, represented as a 128-bit value. The function returns `{NodeId, Pid}` after the join completes.
 
-- **§2.3:** route to the node with nodeId numerically closest to key, "among all live Pastry nodes" (p.6).
-- **Open:**
-  - **No return value.** It's one-way, so the paper's API has no way for a lookup to get its string back.
-  - **Who calls it.** In your design the peer calls it on itself, so is it a function call inside the actor or a message to self?
-  - **Message format.** The handout lets you change "the message type". What does a msg carry (request kind, string, requester, hop count)?
-- **Decide:** how a get request returns its value:
-  - deliver sends a direct reply to the requester (outside Pastry);
-  - the reply is itself routed with `route(reply, requesterId)`;
-  - fire-and-forget, where nobody gets an answer.
+Nodes join sequentially. The new node routes a join message using its node ID as the key. Each peer along the path appends its routing table and leaf set to the message. The numerically closest peer returns the collected information in a single reply. The new node merges the discovered information, then sends its state to peers in its routing table and leaf set. The join completes after all acknowledgements arrive.
 
-  Whichever you pick, does the reply count toward the average hops the handout asks you to print?
-- **Decision:**
-  - Inside a peer, `route` is a function call; between peers the message is `{route, Msg, Key, Hops}`. Msg carries the request kind (put or get), the key, the string for a put, the requester's pid and the request number.
-  - `deliver` sends a get's answer straight to the requester's pid, outside Pastry. The answer is not routed, so it does not count toward the hops.
-  - The routing layer adds one hop per forward.
+The implementation uses 128-bit IDs, a base of 16 (`b = 4`), and a leaf set of 16 nodes, with eight smaller and eight larger IDs. The ID space is circular. The neighborhood set is omitted because all peers run on the same machine. When multiple nodes fit the same routing-table slot, the first discovered node is retained.
 
-## 4. `deliver(msg, key)`
+### 3. `route(msg, key)`
 
-- **§2.3:** called "when a message is received and the local node's nodeId is numerically closest to key, among all live nodes" (p.7).
-- **Open:**
-  - This is where the key → string store does its put or get. What does each request kind do here?
-  - A get for a key that was never stored returns not found. Is that a valid request, or does your workload only get keys known to exist?
-  - A key owned by the requester itself is delivered locally (0 hops). Is it counted?
-- **Decide:** what your app does in deliver, and what (if anything) it reports to whoever computes the average.
-- **Decision:**
-  - A put stores the string; a get looks it up and replies to the requester. Every delivery reports its hop count and the node it reached to the stats actor.
-  - Each peer's first request is a put, then it alternates get and put. A get asks for a random key that the same peer stored earlier, so every get must return exactly the string that was put, and the requester checks that.
-  - A put's key is the MD5 hash of its string (for example `peer17-obj3`), so keys and nodeIds share one space.
-  - A key owned by the requester is delivered locally with 0 hops and is counted. This happens for about one request in N.
+The routing layer forwards each message toward the live node whose ID is numerically closest to the key. Within a peer, `route` is called directly; communication between peers uses messages of the form `{route, Msg, Key, Hops}`.
 
-## 5. `forward(msg, key, nextId)`
+Each message contains the request type (`put` or `get`), key, value when applicable, requester's PID, and request number. The routing layer increments the hop count for each forward.
 
-- **§2.3:** called "just before a message is forwarded"; the app "may change the contents of the message or the value of nextId"; setting nextId to NULL "terminates the message at the local node" (p.7).
-- **Open:** the paper's applications use it (e.g. SCRIBE records subscriptions along the path, p.2–3), but a key → string store doesn't need to change anything.
-- **Options:** a no-op that just returns (msg, nextId) · increment a hop counter inside msg (if so, hop counting becomes an app concern, not Pastry's) · cache values along the path (a PAST-style idea, beyond scope).
-- **Decide:** implement it even if trivial, so the API is complete? And should the hop count live in forward or in the routing layer?
-- **Decision:** `kvstore:forward` returns the message and nextId unchanged, but Pastry calls it before every forward and stops the message at the local node if it returns `null`. Hop counting stays in the routing layer.
+For `get` requests, `deliver` sends the result directly to the requester's PID. The response does not pass through Pastry routing and is excluded from hop-count statistics.
 
-## 6. `newLeafs(leafSet)`
+### 4. `deliver(msg, key)`
 
-- **§2.3:** called "whenever there is a change in the local node's leaf set", so the app can "adjust application-specific invariants" (p.7).
-- **Open:** a single-copy key → string store has no invariant to maintain. This only matters if you replicate values on the closest nodes (the fault-tolerance bonus: values on a node that leaves must survive).
-- **Decide:** no-op for the required project? Do you still call it from the Pastry layer, so the API is complete?
-- **Decision:** `kvstore:new_leafs` does nothing, but Pastry calls it every time the leaf set changes.
+The application callback handles requests at the destination peer. A `put` request stores the key-value pair, while a `get` request retrieves the stored value and returns it to the requester. Each delivery reports its hop count and destination node ID to the statistics actor.
 
-## 7. Running the requests
+Each peer's first request is a `put`, followed by alternating `get` and `put` requests. Every `get` targets a key previously stored by the same peer, allowing the requester to verify the returned value. Put keys are generated by hashing their strings with MD5, placing keys and node IDs in the same identifier space.
 
-- **Decision:**
-  - Main builds the whole network first, then starts the requests. Each peer sends its first request at a random moment in the first second and one per second after that, `numRequests` in total.
-  - A stats actor collects each delivery's hop count and each get result. When `numNodes × numRequests` requests have been delivered and every get has been answered, it tells main, which prints the results and exits.
-  - The stats actor knows every nodeId and checks that each request reached the node numerically closest to its key.
-  - Output: average hops, ⌈log₁₆ N⌉ for comparison, the hop distribution, how many requests reached the right node, how many gets returned the right string, and a `RESULT,...` line for scripts.
+Local deliveries are counted with zero hops. The statistics actor records all deliveries and verifies their destinations.
+
+### 5. `forward(msg, key, nextId)`
+
+The `kvstore:forward` callback returns the message and `nextId` unchanged. Pastry invokes it before each forwarding operation. If the callback returns `null` as the next hop, the message terminates at the local peer. Hop counting remains the responsibility of the routing layer.
+
+### 6. `newLeafs(leafSet)`
+
+The `kvstore:new_leafs` callback is a no-op because the key-value application has no leaf-set-dependent invariants. Pastry invokes it whenever the local leaf set changes, keeping the application interface complete.
+
+## Experimental Results
+
+The following results were obtained from actual runs of the implementation.
+All results in this section are from the normal, no-failure mode.
+
+| Nodes | Requests per node | Total requests | Delivered | Average hops | Closest node | Gets |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 2 | 8 | 8/8 | 0.7500 | 8/8 | 4/4 |
+| 12 | 4 | 48 | 48/48 | 0.9583 | 48/48 | 24/24 |
+| 100,000 | 5 | 500,000 | 500,000/500,000 | 3.9596 | 500,000/500,000 | 200,000/200,000 |
+
+For the 100,000-node run, the hop distribution was:
+
+```text
+1: 338
+2: 7,920
+3: 83,520
+4: 328,070
+5: 80,152
+```
+
+The complete captured output for the largest run is available in
+[results/run-100000.txt](./results/run-100000.txt). It can be reproduced with:
+
+```bash
+erl -make
+escript ./project3 100000 5
+```
+
+The reported average is calculated over all delivered requests, including
+local deliveries with zero hops. The get response is sent directly to the
+requester PID and is not included as an additional Pastry hop.

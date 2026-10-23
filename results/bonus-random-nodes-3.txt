@@ -1,0 +1,9 @@
+Pastry: 12 nodes, 4 requests per node (b = 4, leaf set 16)
+Network built in 3 ms
+Failure test: randomly stopped 3 nodes: [1,5,8]
+Requests: 36/36 delivered in 3.9 s
+Average hops: 0.944  (ceil(log16 N) = 1)
+Hop distribution:  0: 2  1: 34
+Reached the numerically closest node: 36/36
+Gets: 18 ok, 0 wrong string, 0 not found
+RESULT,9,4,0.9444,36,36,36,18,0,0,3,3925

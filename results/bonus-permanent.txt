@@ -1,0 +1,9 @@
+Pastry: 12 nodes, 4 requests per node (b = 4, leaf set 16)
+Network built in 0 ms
+Failure test: permanently blocked connection 1 -> 2
+Requests: 48/48 delivered in 4.0 s
+Average hops: 0.958  (ceil(log16 N) = 1)
+Hop distribution:  0: 2  1: 46
+Reached the numerically closest node: 48/48
+Gets: 24 ok, 0 wrong string, 0 not found
+RESULT,12,4,0.9583,48,48,48,24,0,0,0,3959

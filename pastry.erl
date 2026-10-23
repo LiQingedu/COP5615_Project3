@@ -11,7 +11,7 @@
 %% numerically closest larger nodeIds. The neighborhood set is left out: all
 %% peers run on one machine, so there is no proximity metric to keep it by.
 
--export([init/3, route/2, id/1, digit/2, shl/2, distance/2]).
+-export([init/3, route/2, known_peers/1, id/1, digit/2, shl/2, distance/2]).
 
 -define(DIGITS, 32).            % 128-bit ids, 4 bits per digit
 -define(SPACE, (1 bsl 128)).
@@ -36,7 +36,7 @@
 %% the nodes counterclockwise (smaller ids), hi the nodes clockwise. The
 %% routing table maps {Row, Digit} to {Id, Pid}.
 -record(st, {id, app, app_state, lo = [], hi = [], rt = #{},
-             caller, pending = 0}).
+             caller, pending = 0, blocked = []}).
 
 %%% API
 
@@ -58,6 +58,14 @@ init(Name, {App, Args}, Bootstrap) ->
 route(Msg, Key) ->
     self() ! {route, Msg, Key, 0},
     ok.
+
+%% Return this peer's current directed overlay neighbors for failure experiments.
+known_peers(Pid) ->
+    Ref = make_ref(),
+    Pid ! {get_known, self(), Ref},
+    receive {known_peers, Ref, Refs} -> Refs after ?JOIN_TIMEOUT ->
+        error({known_peers_timeout, Pid})
+    end.
 
 %% 128-bit id of a name: used for nodeIds and for object keys.
 id(Name) ->
@@ -105,6 +113,11 @@ loop(St) ->
         {announce, X = {_, XPid}, Known} ->
             XPid ! announce_ack,
             loop(insert_all([X | Known], St));
+        {disconnect, Peer, Duration} ->
+            loop(block_connection(Peer, Duration, St));
+        {get_known, From, Ref} ->
+            From ! {known_peers, Ref, known(St)},
+            loop(St);
         announce_ack ->
             loop(announce_ack(St));
         Info ->
@@ -142,7 +155,11 @@ next_hop(Key, St = #st{id = Me, rt = Rt}) ->
         false ->
             Row = shl(Key, Me),
             case maps:find({Row, digit(Key, Row)}, Rt) of
-                {ok, Ref} -> Ref;
+                {ok, Ref} ->
+                    case usable(Ref, St) of
+                        true -> Ref;
+                        false -> rare_case(Key, Row, St)
+                    end;
                 error -> rare_case(Key, Row, St)
             end
     end.
@@ -159,17 +176,16 @@ in_leaf_range(Key, #st{id = Me, lo = Lo, hi = Hi}) ->
     Cw =< FarHi orelse ?SPACE - Cw =< FarLo
         orelse lists:any(fun({_, Id, _}) -> lists:keymember(Id, 2, Hi) end, Lo).
 
-closest_leaf(Key, #st{id = Me, lo = Lo, hi = Hi}) ->
-    {_, _, Best} = lists:min([{distance(Me, Key), Me, self} |
-                              [{distance(Id, Key), Id, {Id, Pid}}
-                               || {_, Id, Pid} <- Lo ++ Hi]]),
-    Best.
+closest_leaf(Key, St = #st{id = Me}) ->
+    Refs = [{Me, self()} | known(St)],
+    closest_known(Key, [Ref || Ref <- Refs, usable(Ref, St)]).
 
 %% No routing table entry: any known node that shares at least as long a
 %% prefix with Key and is numerically closer to it than this node.
 rare_case(Key, Row, St = #st{id = Me}) ->
     MyDist = distance(Me, Key),
-    case [{D, Id, {Id, Pid}} || {Id, Pid} <- known(St), shl(Id, Key) >= Row,
+    case [{D, Id, {Id, Pid}} || {Id, Pid} <- known(St), usable({Id, Pid}, St),
+                                shl(Id, Key) >= Row,
                                 D <- [distance(Id, Key)], D < MyDist] of
         [] -> self;
         Candidates -> element(3, lists:min(Candidates))
@@ -177,6 +193,37 @@ rare_case(Key, Row, St = #st{id = Me}) ->
 
 pid_of(Id, Default, St) ->
     proplists:get_value(Id, known(St), Default).
+
+usable({_, Pid}, #st{blocked = Blocked}) ->
+    is_process_alive(Pid) andalso not blocked(Pid, Blocked).
+
+blocked(Pid, Blocked) ->
+    lists:any(fun
+        ({Pid0, infinity}) when Pid0 =:= Pid -> true;
+        ({Pid0, Until}) when Pid0 =:= Pid -> Until > erlang:monotonic_time(millisecond);
+        (_) -> false
+    end, Blocked).
+
+block_connection(Peer, Duration, St = #st{blocked = Blocked}) ->
+    Until = case Duration of
+                infinity -> infinity;
+                Ms when is_integer(Ms), Ms >= 0 ->
+                    erlang:monotonic_time(millisecond) + Ms
+            end,
+    St#st{blocked = [{Peer, Until} | [B || B = {P, _} <- Blocked, P =/= Peer]]}.
+
+closest_known(Key, Refs) ->
+    Alive = [{distance(Id, Key), Id, Pid} ||
+             {Id, Pid} <- Refs, is_process_alive(Pid)],
+    case Alive of
+        [] -> self;
+        _ ->
+            {_, Id, Pid} = lists:min(Alive),
+            case Pid =:= self() of
+                true -> self;
+                false -> {Id, Pid}
+            end
+    end.
 
 %%% Join (section 2.4)
 
