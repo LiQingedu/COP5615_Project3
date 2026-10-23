@@ -78,9 +78,7 @@ after that point. However, get correctness fell as more links were temporarily
 blocked. A put routed during an outage can be stored at a live node that is not
 the key's closest node; after the link recovers, a later get may route to the
 closest node and not find that copy. At 50% temporary link failures, all
-requests were delivered but 2,348 of 20,000 gets returned not found. This
-exposes the application's lack of replication or migration when routes change.
-The tests do not demonstrate long-term route-table repair or data replication.
+requests were delivered but 2,348 of 20,000 gets returned not found. 
 
 ## Captured output
 

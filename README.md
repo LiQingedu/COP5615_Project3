@@ -8,18 +8,25 @@ Requires Erlang/OTP 25 or newer (we use OTP 29).
 
 ```bash
 erl -make
-escript ./project3 numNodes numRequests
+./project3 numNodes numRequests
 ```
 
-`erl -make` compiles `pastry.erl` before `kvstore.erl`, which uses it as a behaviour. Add `verbose=true` to print join progress to stderr. Without the escript wrapper:
+`project3` is an executable escript with a `#!/usr/bin/env escript` shebang;
+`escript ./project3 numNodes numRequests` is equivalent. The bare command
+`project3 numNodes numRequests` works when the current directory is on `PATH`.
+`erl -make` compiles `pastry.erl` before `kvstore.erl`, which uses it as a
+behaviour. Add `verbose=true` to print join progress to stderr. Without the
+escript wrapper:
 
 ```bash
 erl -noshell +P 4000000 -pa . -s project3 start -extra 1000 10
 erl -noshell +P 4000000 -pa . -s project3 start 1000 10
 ```
 
-The `./` is intentional: shells do not search the current directory for
-executables unless it is explicitly included in the path.
+Both `-extra` arguments (read by `init:get_plain_arguments/0`) and direct
+arguments (passed by `-s` to `start/1`) are supported. The `./` is needed when
+running an executable in the current directory because shells do not search
+the current directory by default.
 
 ## What Is Working
 
